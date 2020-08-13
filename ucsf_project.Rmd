@@ -9,6 +9,8 @@ library(lubridate)
 library('scales')
 require(data.table)
 
+#######LOAD IN FILE#########
+#This function loads in the data with the absolute path of the file, and subsets the file based on the columns we need 
 data_load <- function(filename){
 print("data_load function")
 
@@ -19,9 +21,12 @@ tidepool_small <- tidepool_data[,c('time','type','deviceId','value')]
 return(tidepool_small)
 }
 
+######PREPROCESSING#######
+
 preprocess <- function(d1){
+
 #Converting from mmol/L to ml/dl, mg/dl
-d1$value <- d1$value*18
+d1$value <- d1$value*18 
 
 
 #subsetting the data by device type 
@@ -82,7 +87,8 @@ subset_list <- list(cbg_1, smbg_1, basal_1, bolus_1)
 return(subset_list)
 }
 
-
+########REMOVE DUPLICATES##########
+##This function reads in the data and checks to see if there are two times that are less than 3 minutes apart and the value is the same, we set that duplicate value to NA
 take_out_duplicates <- function(data){
 count = 1
 for (i in data$time){
@@ -95,8 +101,6 @@ for (i in data$time){
   k <- difftime(t1,t3, units= 'secs')
   j <- as.numeric(abs(j))
   k <- as.numeric(abs(k))
-  
-  
   
   if(j <= 180 | k <= 180 ){
     if((data$value[count] == data$value[count+1]) == TRUE | is.na(data$value[count]) == TRUE | (data$value[count] == data$value[count+2]) == TRUE){
@@ -116,9 +120,11 @@ for (i in data$time){
 return(data)
 }
 
-
+######SUBSETTING DATA BY SPECIFIC TIME FRAME################
+#This function takes in start time and an end time and subsets the data by that specific time frame and returns the subsetted list of each data type
 get_subsets <- function(cgm, smbg, bolus, start, end){
 
+#Finding indeces to set for subsetting data 
 cc_index <-  which(cgm$time > end & cgm$time < start)
 s_index <-  which(smbg$time > end & smbg$time < start)
 bol_index <-  which(bolus$time > end & bolus$time < start)
@@ -146,7 +152,7 @@ return(list(cgm_month,smbg_month,bolus_month))
 }
 
 
-
+###FUNCTIONS TO FIND EVENTS#####
 
 ###LOW AND SMBG - 60 min
 low_smbg <- function(cgm,smbg){
@@ -189,7 +195,7 @@ values <- list(count_before, count_after, avg_before, avg_after)
 return(values)
 }
 
-
+###LOW and SMBG - 5 min
 low_smbg_5 <- function(cgm, smbg){
 cgm <- as.data.frame(cgm)
 smbg <- as.data.frame(smbg)
@@ -230,7 +236,7 @@ return(values)
 
 }
 
-###LOW AND BOLUS - 60 min time slot 
+###LOW AND BOLUS - 60 min 
 low_bolus <- function(cgm, bolus){
 cgm <- as.data.frame(cgm)
 bolus <- as.data.frame(bolus)
@@ -486,14 +492,21 @@ values <- list(count_before,count_after)
 return(values)
 }
 
+######## AGGREGATING VALUES FOR FILE ################
+###This function is getting all variables we will need to insert into final file created, for ONE MONTH, or can specify any time range
 aggregate_data <- function(patient_id,cgm, smbg, bolus, start, end){
+
+##aggregating data for one month
 range <- get_subsets(cgm,smbg,bolus,start,end)
 patient_id <- patient_id
+
+#Grabbing start/end dates to print to file 
 start_print <- strftime(start, format = "%m/%d/%y", tz = "UTC")
 end_print <- strftime(end, format = "%m/%d/%y", tz = "UTC")
 
 
 end <- end 
+#separating out each data type by dataframe
 cgm_month <- as.data.frame(range[[1]])
 smbg_month <- as.data.frame(range[[2]])
 bolus_month <- as.data.frame(range[[3]])
@@ -539,7 +552,7 @@ value_7d <- v7[[4]]
 value_8a <- v8[[1]]
 value_8b <- v8[[2]]
 
-
+####aggregating metrics for CGM values in specific ranges
 below_54  = sum(cgm_month$value < 54)
 b70_a54  = sum(cgm_month$value >= 54 & cgm_month$value< 70)  
 b180_a70  = sum(cgm_month$value >= 70 & cgm_month$value < 180)
@@ -564,28 +577,32 @@ return(final_list)
 
 }
 
+######## GETTING DATA FOR ONE PATIENT ##############
 one_patient <- function(full_path, patient_id){
   
-
+###Loading in data based off of full path of where file is located
 data <- data_load(full_path)
 
-
+#Preprocessing 
 data <- preprocess(data)
 
 cgm <- as.data.frame(data[[1]])
 smbg <- as.data.frame(data[[2]])
 bolus <- as.data.frame(data[[4]])
 
+##Finding the range of times in file. We wanted to look at most recent data and go back month by month from there, therefore took the last time stamp and will record 30 days back from each patient
 c_date <- range(cgm$time)[2]
 s_date <- range(smbg$time)[2]
 bol_date <- range(bolus$time)[2]
 
+#Because the times of each value (smbg, cgm, and bolus) are all different, we take the min value of the end times to ensure that we will have data for all three data types
 startm_list <- list(c_date, s_date, bol_date)
-
+#Extracting the minimum value of the end times
 start_time <- min(unlist(startm_list))
 
 start <- strptime(start_time,format="%Y-%m-%d %H:%M:%S", tz = "UTC")
 
+# separating data from the end time, by 30 days, and recording 3, 30 day time frames for each patient
 b <- start-days(30)
 c <- b - days(30)
 d <- c - days(30)
@@ -595,10 +612,15 @@ c_names <- c('patient_id', 'start_date', 'end_date', 'total_cgm','avg_cgm' ,'med
 new_patient <- data.frame(matrix(ncol = 42, nrow = 1))
 colnames(new_patient) <- c_names
 
+#Creating values for first set of 30 days 
 range_1 <- aggregate_data(patient_id,cgm,smbg,bolus,start, b)
 new_patient <- rbind(new_patient, range_1)
+
+#Creating values for second set of 30 days 
 range_2 <- aggregate_data(patient_id,cgm,smbg,bolus,b,c)
 new_patient <- rbind(new_patient,range_2)
+
+#Creating values for third set of 30 days 
 range_3 <- aggregate_data(patient_id, cgm,smbg,bolus,c,d)
 new_patient <- rbind(new_patient,range_3)
 
@@ -611,9 +633,12 @@ return(new_patient)
 
 
 ```{r}
+
+######## AGGREGATING DATA FOR ALL PATIENTS IN A DIRECTORY ###########
+### Retrieving a list of all the file names in the directory
 file_names =  list.files(path = "root directory of where files are stored")
 
-
+#Setting the first part to the absolute path 
 first = "root directory of where files are stored"
 
 final_df <- data.frame(matrix(ncol = 42, nrow = 0))
@@ -622,6 +647,7 @@ c_names <- c('patient_id', 'start_date', 'end_date', 'total_cgm','avg_cgm' ,'med
 
 colnames(final_df) <- c_names
 
+#Looping through all the file names in the list, adding them to the end of the first part of the absolute path, and creating data for each file
 for(i in file_names){
   fullpath <- paste(first,i, sep="")
   print(paste("File name: ", i))
@@ -634,7 +660,7 @@ for(i in file_names){
     
 })
  
-  
+  ##Adding the one patient in the loop to the final df that we will write to the file 
   final_df <- rbind(final_df, patient)
   print("File is done.")
   
@@ -646,6 +672,9 @@ for(i in file_names){
 ```
 
 ```{r}
+
+####CODE TO TEST OUT ONE PATIENT######
+#Created this chunk to check for bugs in the function one_patient() above
 full_path <- "/full path of file to be read in"
 
 data <- data_load(full_path)
@@ -687,6 +716,7 @@ new_patient <- rbind(new_patient,range_3)
 ```
 
 ```{r}
+####### WRITING FINAL_DF TO A FILE ###########
 write.csv(final_df,'name of new file')
 ```
 

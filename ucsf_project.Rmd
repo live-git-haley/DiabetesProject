@@ -1,0 +1,692 @@
+---
+title: "ucsf_project"
+output: html_document
+---
+
+```{r}
+
+library(lubridate)
+library('scales')
+require(data.table)
+
+data_load <- function(filename){
+print("data_load function")
+
+tidepool_data <- fread(filename)
+
+tidepool_small <- tidepool_data[,c('time','type','deviceId','value')]
+
+return(tidepool_small)
+}
+
+preprocess <- function(d1){
+#Converting from mmol/L to ml/dl, mg/dl
+d1$value <- d1$value*18
+
+
+#subsetting the data by device type 
+basal_1 <- subset(d1, d1$type == "basal")
+bolus_1 <- subset(d1, d1$type == "bolus")
+cbg_1 <- subset(d1, d1$type == "cbg")
+smbg_1 <- subset(d1, d1$type == "smbg")
+
+
+
+#Data preproccessing- removing unneccesary characters within time/date column
+bolus_1$time <- gsub("T", " ", bolus_1$time)
+bolus_1$time <- gsub(".000Z", "", bolus_1$time)
+
+basal_1$time <- gsub("T", " ", basal_1$time)
+basal_1$time <- gsub(".000Z", "", basal_1$time)
+
+cbg_1$time <- gsub("T", " ", cbg_1$time)
+cbg_1$time <- gsub(".000Z", "", cbg_1$time)
+
+smbg_1$time <- gsub("T", " ", smbg_1$time)
+smbg_1$time <- gsub(".000Z", "", smbg_1$time)
+
+
+
+#Creating new columns for high/low events
+cbg_1$"is_below70" = FALSE
+cbg_1$"is_below70" = cbg_1$value < 70
+
+below70_rle = rle(cbg_1$is_below70)
+below70_rle$true_event_index = below70_rle$values==TRUE & below70_rle$lengths >= 3
+cbg_1$is_below70_event = rep(below70_rle$true_event_index, below70_rle$lengths)
+
+cbg_1$below70_event_start = FALSE
+
+all_event_locations = c(1, cumsum(below70_rle$lengths)[-length(below70_rle$lengths)]+1)
+
+true_event_locations = all_event_locations[below70_rle$true_event_index]
+
+cbg_1[true_event_locations,]$below70_event_start = TRUE
+     
+
+cbg_1$"is_above180" = FALSE
+cbg_1$"is_above180" = cbg_1$value > 180
+
+above180_rle = rle(cbg_1$is_above180)
+above180_rle$true_event_index = above180_rle$values==TRUE & above180_rle$lengths >= 3
+cbg_1$is_above180_event = rep(above180_rle$true_event_index, above180_rle$lengths)
+#
+cbg_1$above180_event_start = FALSE
+#
+all_event_locations = c(1, cumsum(above180_rle$lengths)[-length(above180_rle$lengths)]+1)
+true_event_locations = all_event_locations[above180_rle$true_event_index]
+cbg_1[true_event_locations,]$above180_event_start = TRUE
+
+
+subset_list <- list(cbg_1, smbg_1, basal_1, bolus_1)
+return(subset_list)
+}
+
+
+take_out_duplicates <- function(data){
+count = 1
+for (i in data$time){
+  if(count+2 < nrow(data)){
+    
+  t1 <- data$time[count]
+  t2 <- data$time[count+1]
+  t3 <- data$time[count+1]
+  j <- difftime(t1,t2, units= 'secs')
+  k <- difftime(t1,t3, units= 'secs')
+  j <- as.numeric(abs(j))
+  k <- as.numeric(abs(k))
+  
+  
+  
+  if(j <= 180 | k <= 180 ){
+    if((data$value[count] == data$value[count+1]) == TRUE | is.na(data$value[count]) == TRUE | (data$value[count] == data$value[count+2]) == TRUE){
+    data$value[count] <- NA
+    }
+    
+  }
+  count_list <- c(5000,10000,50000,100000,125000,150000,175000,200000)
+  if(is.element(count, count_list) == TRUE){
+  print(count)
+    }
+    count = count+1
+    
+    
+  }
+}
+return(data)
+}
+
+
+get_subsets <- function(cgm, smbg, bolus, start, end){
+
+cc_index <-  which(cgm$time > end & cgm$time < start)
+s_index <-  which(smbg$time > end & smbg$time < start)
+bol_index <-  which(bolus$time > end & bolus$time < start)
+
+
+c_begin <- cc_index[1]
+c_end <- cc_index[length(cc_index)]
+
+s_beg <- s_index[1]
+s_end <- s_index[length(s_index)]
+
+b_beg <- bol_index[1]
+b_end <- bol_index[length(bol_index)]
+
+cgm_month <- cgm[(cgm$time > cgm$time[c_begin] & cgm$time < cgm$time[c_end]),]
+cgm_month <- take_out_duplicates(cgm_month)
+cgm_month <- na.omit(cgm_month)
+
+smbg_month <- smbg[(smbg$time > smbg$time[s_beg] & smbg$time < smbg$time[s_end]),]
+
+bolus_month <- bolus[(bolus$time > bolus$time[b_beg] & bolus$time < bolus$time[b_end]),]
+
+
+return(list(cgm_month,smbg_month,bolus_month))
+}
+
+
+
+
+###LOW AND SMBG - 60 min
+low_smbg <- function(cgm,smbg){
+cgm <- as.data.frame(cgm)
+smbg <- as.data.frame(smbg)
+
+below_70 <- list(which(cgm$below70_event_start == TRUE))
+
+before_list <- c()
+after_list <- c()
+
+for(k in smbg$time){
+  a <- strptime(k,format="%Y-%m-%d %H:%M:%S", tz = "UTC")
+  for(i in below_70[[1]]){
+   
+   b <- cgm$time[i]
+   if(abs(as.numeric(difftime(b,a, units = "mins"))) < 60){
+    cat("Smbg time: ", as.character(a), " ")
+    cat("Low Alert: ", as.character(b))
+    
+    if(as.numeric(difftime(b,a, units = "mins")) < 0){
+      before_list <- c(before_list, as.numeric(difftime(b,a, units = "mins")))
+    }
+    if(as.numeric(difftime(b,a, units = "mins")) > 0){
+      after_list <- c(after_list, as.numeric(difftime(b,a, units = "mins")))
+    }
+   
+   
+    print(difftime(b,a, units = "mins"))
+
+    }
+  }
+  
+}
+count_before <- length(before_list)
+  count_after <- length(after_list)
+  avg_before <- mean(before_list)
+  avg_after <- mean(after_list)
+values <- list(count_before, count_after, avg_before, avg_after)
+return(values)
+}
+
+
+low_smbg_5 <- function(cgm, smbg){
+cgm <- as.data.frame(cgm)
+smbg <- as.data.frame(smbg)
+
+below_70<- list(which(cgm$below70_event_start == TRUE))
+
+before_list <- c()
+after_list <- c()
+
+for(k in smbg$time){
+  a <- strptime(k,format="%Y-%m-%d %H:%M:%S", tz = "UTC")
+  for(i in below_70[[1]]){
+   
+   b <- cgm$time[i]
+   if(abs(as.numeric(difftime(b,a, units = "mins"))) < 5){
+    cat("Smbg time: ", as.character(a), " ")
+    cat("High Alert: ", as.character(b))
+    
+    if(as.numeric(difftime(b,a, units = "mins")) < 0){
+      before_list <- c(before_list, as.numeric(difftime(b,a, units = "mins")))
+    }
+    if(as.numeric(difftime(b,a, units = "mins")) > 0){
+      after_list <- c(after_list, as.numeric(difftime(b,a, units = "mins")))
+    }
+   
+   
+    print(difftime(b,a, units = "mins"))
+
+    }
+  }
+  
+  
+}
+count_before <- length(before_list)
+  count_after <- length(after_list)
+values <- list(count_before, count_after)
+return(values)
+
+}
+
+###LOW AND BOLUS - 60 min time slot 
+low_bolus <- function(cgm, bolus){
+cgm <- as.data.frame(cgm)
+bolus <- as.data.frame(bolus)
+
+below_70 <- list(which(cgm$below70_event_start == TRUE))
+
+before_list <- c()
+after_list <- c()
+
+for(k in bolus$time){
+  a <- strptime(k,format="%Y-%m-%d %H:%M:%S", tz = "UTC")
+  for(i in below_70[[1]]){
+   
+    b <- strptime(cgm$time[i],format="%Y-%m-%d %H:%M:%S", tz = "UTC")
+
+   if(abs(as.numeric(difftime(b,a, units = "mins"))) < 60){
+    cat("Bolus: ", as.character(a), " ")
+    cat("Low Alert: ", as.character(b))
+    
+    if(as.numeric(difftime(b,a, units = "mins")) < 0){
+      before_list <- c(before_list, as.numeric(difftime(b,a, units = "mins")))
+    }
+    if(as.numeric(difftime(b,a, units = "mins")) > 0){
+      after_list <- c(after_list, as.numeric(difftime(b,a, units = "mins")))
+    }
+   
+   
+    print(difftime(b,a, units = "mins"))
+    }
+  }
+  
+}
+count_before <- length(before_list)
+  count_after <- length(after_list)
+  avg_before <- mean(before_list)
+  avg_after <- mean(after_list)
+values <- list(count_before, count_after, avg_before, avg_after)
+return(values)
+
+}
+
+###Freq Low AND BOLUS - 5 min
+low_bolus_5  <- function(cgm, bolus){
+cgm <- as.data.frame(cgm)
+bolus <- as.data.frame(bolus)
+
+below_70<- list(which(cgm$below70_event_start == TRUE))
+
+before_list <- c()
+after_list <- c()
+
+for(k in bolus$time){
+  a <- strptime(k,format="%Y-%m-%d %H:%M:%S", tz = "UTC")
+  for(i in below_70[[1]]){
+   
+   b <- strptime(cgm$time[i],format="%Y-%m-%d %H:%M:%S", tz = "UTC")
+
+   if(abs(as.numeric(difftime(b,a, units = "mins"))) < 5){
+    cat("Smbg time: ", as.character(a), " ")
+    cat("High Alert: ", as.character(b))
+    
+    if(as.numeric(difftime(b,a, units = "mins")) < 0){
+      before_list <- c(before_list, as.numeric(difftime(b,a, units = "mins")))
+    }
+    if(as.numeric(difftime(b,a, units = "mins")) > 0){
+      after_list <- c(after_list, as.numeric(difftime(b,a, units = "mins")))
+    }
+   
+   
+    print(difftime(b,a, units = "mins"))
+    }
+  }
+  
+  
+}
+count_before <- length(before_list)
+  count_after <- length(after_list)
+values <- list(count_before,count_after)
+return(values)
+}
+
+###High AND SMBG - 60 min time slot 
+
+high_smbg <- function(cgm, smbg){
+cgm <- as.data.frame(cgm)
+smbg <- as.data.frame(smbg)
+
+above_180<- list(which(cgm$above180_event_start == TRUE))
+
+before_list <- c()
+after_list <- c()
+
+for(k in smbg$time){
+  a <- strptime(k,format="%Y-%m-%d %H:%M:%S", tz = "UTC")
+  for(i in above_180[[1]]){
+   
+    b <- strptime(cgm$time[i],format="%Y-%m-%d %H:%M:%S", tz = "UTC")
+
+   if(abs(as.numeric(difftime(b,a, units = "mins"))) < 60){
+    cat("Smbg time: ", as.character(a), " ")
+    cat("High Alert: ", as.character(b))
+    
+    if(as.numeric(difftime(b,a, units = "mins")) < 0){
+      before_list <- c(before_list, as.numeric(difftime(b,a, units = "mins")))
+    }
+    if(as.numeric(difftime(b,a, units = "mins")) > 0){
+      after_list <- c(after_list, as.numeric(difftime(b,a, units = "mins")))
+    }
+   
+   
+    print(difftime(b,a, units = "mins"))
+    }
+  }
+  
+}
+
+count_before <- length(before_list)
+  count_after <- length(after_list)
+  avg_before <- mean(before_list)
+  avg_after <- mean(after_list)
+
+values <- list(count_before, count_after, avg_before, avg_after)
+
+return(values)
+}
+
+### FREQ High AND SMBG - 5 min
+
+high_smbg_5 <- function(cgm,smbg) {
+cgm <- as.data.frame(cgm)
+smbg <- as.data.frame(smbg)
+
+above_180<- list(which(cgm$above180_event_start == TRUE))
+
+before_list <- c()
+after_list <- c()
+
+for(k in smbg$time){
+  a <- strptime(k,format="%Y-%m-%d %H:%M:%S", tz = "UTC")
+  for(i in above_180[[1]]){
+   
+    b <- strptime(cgm$time[i],format="%Y-%m-%d %H:%M:%S", tz = "UTC")
+
+   if(abs(as.numeric(difftime(b,a, units = "mins"))) < 5){
+    cat("Smbg time: ", as.character(a), " ")
+    cat("High Alert: ", as.character(b))
+    
+    if(as.numeric(difftime(b,a, units = "mins")) < 0){
+      before_list <- c(before_list, as.numeric(difftime(b,a, units = "mins")))
+    }
+    if(as.numeric(difftime(b,a, units = "mins")) > 0){
+      after_list <- c(after_list, as.numeric(difftime(b,a, units = "mins")))
+    }
+   
+   
+    print(difftime(b,a, units = "mins"))
+    }
+  }
+  
+  
+}
+count_before <- length(before_list)
+  count_after <- length(after_list)
+
+values <- list(count_before,count_after)
+
+return(values)
+}
+
+###HIGH AND BOLUS - 60 min
+high_bolus <- function(cgm,bolus){
+cgm <- as.data.frame(cgm)
+bolus <- as.data.frame(bolus)
+
+
+above_180 <- list(which(cgm$above180_event_start == TRUE))
+before_list <- c()
+after_list <- c()
+
+for(k in bolus$time){
+  a <- strptime(k,format="%Y-%m-%d %H:%M:%S", tz = "UTC")
+  for(i in above_180[[1]]){
+   
+    b <- strptime(cgm$time[i],format="%Y-%m-%d %H:%M:%S", tz = "UTC")
+
+   if(abs(as.numeric(difftime(b,a, units = "mins"))) < 60){
+    cat("Bolus: ", as.character(a), " ")
+    cat("High Alert: ", as.character(b))
+    
+    if(as.numeric(difftime(b,a, units = "mins")) < 0){
+      before_list <- c(before_list, as.numeric(difftime(b,a, units = "mins")))
+    }
+    if(as.numeric(difftime(b,a, units = "mins")) > 0){
+      after_list <- c(after_list, as.numeric(difftime(b,a, units = "mins")))
+    }
+   
+   
+    print(difftime(b,a, units = "mins"))
+    }
+  }
+  
+  
+}
+count_before <- length(before_list)
+  count_after <- length(after_list)
+   avg_before <- mean(before_list)
+  avg_after <- mean(after_list)
+values <- list(count_before, count_after, avg_before, avg_after)
+
+return(values)
+}
+
+
+###Freq HIGH AND BOLUS - 5 min
+
+high_bolus_5 <- function(cgm, bolus){
+cgm <- as.data.frame(cgm)
+bolus <- as.data.frame(bolus)
+
+above_180<- list(which(cgm$above180_event_start == TRUE))
+
+before_list <- c()
+after_list <- c()
+
+for(k in bolus$time){
+  a <- strptime(k,format="%Y-%m-%d %H:%M:%S", tz = "UTC")
+  
+  for(i in above_180[[1]]){
+   
+    b <- strptime(cgm$time[i],format="%Y-%m-%d %H:%M:%S", tz = "UTC")
+
+   if(abs(as.numeric(difftime(b,a, units = "mins"))) < 5){
+    cat("Smbg time: ", as.character(a), " ")
+    cat("High Alert: ", as.character(b))
+    
+    if(as.numeric(difftime(b,a, units = "mins")) < 0){
+      before_list <- c(before_list, as.numeric(difftime(b,a, units = "mins")))
+    }
+    if(as.numeric(difftime(b,a, units = "mins")) > 0){
+      after_list <- c(after_list, as.numeric(difftime(b,a, units = "mins")))
+    }
+   
+   
+    print(difftime(b,a, units = "mins"))
+    }
+  }
+  
+  
+}
+count_before <- length(before_list)
+count_after <- length(after_list)
+values <- list(count_before,count_after)
+return(values)
+}
+
+aggregate_data <- function(patient_id,cgm, smbg, bolus, start, end){
+range <- get_subsets(cgm,smbg,bolus,start,end)
+patient_id <- patient_id
+start_print <- strftime(start, format = "%m/%d/%y", tz = "UTC")
+end_print <- strftime(end, format = "%m/%d/%y", tz = "UTC")
+
+
+end <- end 
+cgm_month <- as.data.frame(range[[1]])
+smbg_month <- as.data.frame(range[[2]])
+bolus_month <- as.data.frame(range[[3]])
+
+v1 <- low_smbg(cgm_month,smbg_month)
+v2 <- low_smbg_5(cgm_month,smbg_month)
+v3 <- low_bolus(cgm_month,bolus_month)
+v4 <- low_bolus_5(cgm_month,bolus_month)
+v5 <- high_smbg(cgm_month,smbg_month)
+v6 <- high_smbg_5(cgm_month,smbg_month)
+v7 <- high_bolus(cgm_month,bolus_month)
+v8 <- high_bolus_5(cgm_month,bolus_month)
+
+value_1a <- v1[[1]]
+value_1b <- v1[[2]]
+value_1c <- v1[[3]]
+value_1d <- v1[[4]]
+
+value_2a <- v2[[1]]
+value_2b <- v2[[2]]
+
+value_3a <- v3[[1]]
+value_3b <- v3[[2]]
+value_3c <- v3[[3]]
+value_3d <- v3[[4]]
+
+value_4a <- v4[[1]]
+value_4b <- v4[[2]]
+
+value_5a <- v5[[1]]
+value_5b <- v5[[2]]
+value_5c <- v5[[3]]
+value_5d <- v5[[4]]
+
+value_6a <- v6[[1]]
+value_6b <- v6[[2]]
+
+value_7a <- v7[[1]]
+value_7b <- v7[[2]]
+value_7c <- v7[[3]]
+value_7d <- v7[[4]]
+
+value_8a <- v8[[1]]
+value_8b <- v8[[2]]
+
+
+below_54  = sum(cgm_month$value < 54)
+b70_a54  = sum(cgm_month$value >= 54 & cgm_month$value< 70)  
+b180_a70  = sum(cgm_month$value >= 70 & cgm_month$value < 180)
+b250_a180  = sum(cgm_month$value >= 180 & cgm_month$value < 250)
+above_250 = sum(cgm_month$value >= 250)
+
+total_high <- sum(cgm_month$above180_event_start == TRUE)
+total_low <- sum(cgm_month$below70_event_start == TRUE)
+total_cgm <- length(cgm_month$value)
+avg_cgm <- mean(cgm_month$value)
+med_cgm <- median(cgm_month$value)
+max_cgm <- max(cgm_month$value)
+min_cgm <- min(cgm_month$value)
+
+standard_dev <- sd(cgm_month$value)
+covar <- standard_dev/avg_cgm
+GMI <- 3.31 + 0.02392 * avg_cgm
+
+final_list <- list(patient_id, start_print, end_print,  total_cgm,avg_cgm ,med_cgm ,max_cgm ,min_cgm,standard_dev,covar, GMI, below_54,b70_a54,b180_a70,b250_a180, above_250, total_high, total_low, value_1a,value_1b, value_1c, value_1d, value_2a, value_2b, value_3a, value_3b, value_3c, value_3d, value_4a, value_4b, value_5a, value_5b, value_5c, value_5d, value_6a, value_6b, value_7a, value_7b, value_7c, value_7d,value_8a, value_8b)
+
+return(final_list)
+
+}
+
+one_patient <- function(full_path, patient_id){
+  
+
+data <- data_load(full_path)
+
+
+data <- preprocess(data)
+
+cgm <- as.data.frame(data[[1]])
+smbg <- as.data.frame(data[[2]])
+bolus <- as.data.frame(data[[4]])
+
+c_date <- range(cgm$time)[2]
+s_date <- range(smbg$time)[2]
+bol_date <- range(bolus$time)[2]
+
+startm_list <- list(c_date, s_date, bol_date)
+
+start_time <- min(unlist(startm_list))
+
+start <- strptime(start_time,format="%Y-%m-%d %H:%M:%S", tz = "UTC")
+
+b <- start-days(30)
+c <- b - days(30)
+d <- c - days(30)
+
+c_names <- c('patient_id', 'start_date', 'end_date', 'total_cgm','avg_cgm' ,'med_cgm' ,'max_cgm' ,'min_cgm','standard_dev','covar', 'GMI', 'below_54','b70_a54', 'b180_a70', 'b250_a180', 'above_250', 'total_high', 'total_low', 'value_1a','value_1b', 'value_1c', 'value_1d', 'value_2a', 'value_2b', 'value_3a', 'value_3b', 'value_3c', 'value_3d', 'value_4a', 'value_4b', 'value_5a', 'value_5b', 'value_5c', 'value_5d', 'value_6a', 'value_6b', 'value_7a', 'value_7b', 'value_7c', 'value_7d','value_8a', 'value_8b')
+
+new_patient <- data.frame(matrix(ncol = 42, nrow = 1))
+colnames(new_patient) <- c_names
+
+range_1 <- aggregate_data(patient_id,cgm,smbg,bolus,start, b)
+new_patient <- rbind(new_patient, range_1)
+range_2 <- aggregate_data(patient_id,cgm,smbg,bolus,b,c)
+new_patient <- rbind(new_patient,range_2)
+range_3 <- aggregate_data(patient_id, cgm,smbg,bolus,c,d)
+new_patient <- rbind(new_patient,range_3)
+
+return(new_patient)
+}
+
+
+
+```
+
+
+```{r}
+file_names =  list.files(path = "/Users/haleyhowell/Desktop/Desktop_Haley’s_MacBook_Air/HS650/Tidepool/data-analytics/patients")
+
+
+first = "/Users/haleyhowell/Desktop/Desktop_Haley’s_MacBook_Air/HS650/Tidepool/data-analytics/patients/"
+
+final_df <- data.frame(matrix(ncol = 42, nrow = 0))
+
+c_names <- c('patient_id', 'start_date', 'end_date', 'total_cgm','avg_cgm' ,'med_cgm' ,'max_cgm' ,'min_cgm','standard_dev','covar', 'GMI', 'below_54','b70_a54', 'b180_a70', 'b250_a180', 'above_250', 'total_high', 'total_low', 'value_1a','value_1b', 'value_1c', 'value_1d', 'value_2a', 'value_2b', 'value_3a', 'value_3b', 'value_3c', 'value_3d', 'value_4a', 'value_4b', 'value_5a', 'value_5b', 'value_5c', 'value_5d', 'value_6a', 'value_6b', 'value_7a', 'value_7b', 'value_7c', 'value_7d','value_8a', 'value_8b')
+
+colnames(final_df) <- c_names
+
+for(i in file_names){
+  fullpath <- paste(first,i, sep="")
+  print(paste("File name: ", i))
+  
+  tryCatch({
+     patient <- one_patient(fullpath,i) 
+  },
+  error = function(error_condition) {
+   print("got an error.....")
+    
+})
+ 
+  
+  final_df <- rbind(final_df, patient)
+  print("File is done.")
+  
+}
+
+
+
+
+```
+
+```{r}
+full_path <- "/Users/haleyhowell/Desktop/Desktop_Haley’s_MacBook_Air/HS650/Tidepool/data-analytics/patients/65d250a19e438a4a0cab53a2f27d8194ec24ffa548535fafc6b8a23aafa15875.csv"
+
+data <- data_load(full_path)
+
+
+data <- preprocess(data)
+
+cgm <- as.data.frame(data[[1]])
+smbg <- as.data.frame(data[[2]])
+bolus <- as.data.frame(data[[4]])
+
+c_date <- range(cgm$time)[2]
+s_date <- range(smbg$time)[2]
+bol_date <- range(bolus$time)[2]
+
+startm_list <- list(c_date, s_date, bol_date)
+
+start_time <- min(unlist(startm_list))
+
+start <- strptime(start_time,format="%Y-%m-%d %H:%M:%S", tz = "UTC")
+
+b <- start-days(30)
+c <- b - days(30)
+d <- c - days(30)
+
+c_names <- c('patient_id', 'start_date', 'end_date', 'total_cgm','avg_cgm' ,'med_cgm' ,'max_cgm' ,'min_cgm','standard_dev','covar', 'GMI', 'below_54','b70_a54', 'b180_a70', 'b250_a180', 'above_250', 'total_high', 'total_low', 'value_1a','value_1b', 'value_1c', 'value_1d', 'value_2a', 'value_2b', 'value_3a', 'value_3b', 'value_3c', 'value_3d', 'value_4a', 'value_4b', 'value_5a', 'value_5b', 'value_5c', 'value_5d', 'value_6a', 'value_6b', 'value_7a', 'value_7b', 'value_7c', 'value_7d','value_8a', 'value_8b')
+
+new_patient <- data.frame(matrix(ncol = 42, nrow = 1))
+colnames(new_patient) <- c_names
+
+range_1 <- aggregate_data(patient_id,cgm,smbg,bolus,start, b)
+new_patient <- rbind(new_patient, range_1)
+range_2 <- aggregate_data(patient_id,cgm,smbg,bolus,b,c)
+new_patient <- rbind(new_patient,range_2)
+range_3 <- aggregate_data(patient_id, cgm,smbg,bolus,c,d)
+new_patient <- rbind(new_patient,range_3)
+
+
+```
+
+```{r}
+write.csv(final_df,'Tidepool_studyFINAL.csv')
+```
+

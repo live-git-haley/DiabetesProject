@@ -611,10 +611,10 @@ return(new_patient)
 
 
 ```{r}
-file_names =  list.files(path = "/Users/haleyhowell/Desktop/Desktop_Haley’s_MacBook_Air/HS650/Tidepool/data-analytics/patients")
+file_names =  list.files(path = "root directory of where files are stored")
 
 
-first = "/Users/haleyhowell/Desktop/Desktop_Haley’s_MacBook_Air/HS650/Tidepool/data-analytics/patients/"
+first = "root directory of where files are stored"
 
 final_df <- data.frame(matrix(ncol = 42, nrow = 0))
 
@@ -646,7 +646,7 @@ for(i in file_names){
 ```
 
 ```{r}
-full_path <- "/Users/haleyhowell/Desktop/Desktop_Haley’s_MacBook_Air/HS650/Tidepool/data-analytics/patients/65d250a19e438a4a0cab53a2f27d8194ec24ffa548535fafc6b8a23aafa15875.csv"
+full_path <- "/full path of file to be read in"
 
 data <- data_load(full_path)
 
@@ -687,6 +687,6 @@ new_patient <- rbind(new_patient,range_3)
 ```
 
 ```{r}
-write.csv(final_df,'Tidepool_studyFINAL.csv')
+write.csv(final_df,'name of new file')
 ```
 
